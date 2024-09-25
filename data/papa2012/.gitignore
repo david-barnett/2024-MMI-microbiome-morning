@@ -1,0 +1,4 @@
+*.rds
+*.csv
+*.xlsx
+!processed/backup/*

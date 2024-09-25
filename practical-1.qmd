@@ -1,0 +1,456 @@
+---
+title: "R practical 1 - microbiota analysis basics"
+subtitle: "2024 MMI microbiome morning"
+author: David Barnett
+date: last-modified
+format: html
+keep-md: false
+theme: 
+  light: flatly
+  dark: darkly
+css: ../../.css/instructions.css
+embed-resources: true
+code-block-border-left: true
+code-block-bg: true
+toc: true
+toc-location: right
+toc-depth: 4
+toc-expand: 1
+
+number-sections: true
+number-depth: 3
+fig-align: center
+fig-dpi: 200
+fig-width: 7.5
+fig-height: 5
+code-tools: true
+code-fold: false
+code-link: true
+lightbox: auto
+---
+
+## What is this document?
+
+This is a Quarto "code notebook" - which contains a mixture of normal text and R code.
+
+```{r}
+print("This is R code!") # click the play button (or CTRL/CMD + Enter) to run it!
+```
+
+When you run the code, it shows the output underneath.
+
+## The data
+
+We're going to look at an example stool microbiota dataset, from the Papa et al. 2012 study on paediatric IBD patients (Crohn's and Ulcerative Colitis) and controls.
+
+### Notes on the sequence data processing
+
+*These data have already been processed into a table: counts of how often each sequence occurs in each sample. It started as huge "fastq" text files, full of As, Cs, Ts and Gs, but we will not practice sequence data processing today, because it takes quite a long time to run.*
+
+*At MMI, we run the latest processing approaches on our computational resource, Abacus HPC cluster.*
+
+*We do amplicon sequencing with Illumina MiSeq, or similar technologies, and denoise the output with DADA2 to produce ASV count tables.*
+
+*The example data we will use today are older. The amplicons were sequenced with "454 pyrosequencing" and clustered into OTUs, but the core principles of statistical analysis are the same for both data types.*
+
+## Activities
+
+I have written some R code. You just need to run each step in order. Try to follow what each line of code is doing. Ask questions if something is unclear, or if you want to know more.
+
+-   First we will load some useful R packages
+
+-   Then we will read the data files we need to analyse, and inspect them
+
+-   Then we'll compare the microbiota of cases and controls using two types of analysis, and graphs:
+
+    1.  **Create stacked bar charts** to compare microbiota compositions across patient groups
+    2.  **Calculate the alpha diversity** of each sample, and compare the patient groups
+
+## Load R packages 📦
+
+```{r}
+library(here) # the "here" package helps R find our data files
+library(tidyverse) # "tidyverse" provides generic data science tools
+library(ggh4x) # "ggh4x" helps with customising plots
+library(ggstatsplot) # "ggstatsplot" provides tools for plotting statistical test results
+library(phyloseq) # "phyloseq" provides basic tools for microbiome data science 
+library(microViz) # "microViz" provides tools for microbiome visualisation and analysis
+```
+
+## Read and inspect data 🔍
+
+The data about the patients' age, sex, etc. are stored in a file called `"all_metadata.rds"`
+
+.RDS indicates that this file is in a special "R data storage" format.
+
+We first need to *read* this file into our active R session:
+
+```{r}
+meta <- read_rds(file = here("data/papa2012/processed/all_metadata.rds"))
+```
+
+The data is now stored in a table-shaped object called `meta`.
+
+To inspect this data, type `View(meta)` into the R Console (at the bottom of your screen), and press enter.
+
+Next, we will read in a table of microbial counts (i.e. the processed sequencing data): this is stored as a TSV (tab-separated variables) formatted text file.
+
+```{r}
+counts <- read_tsv(file = here("data/papa2012/papa2012_OTU_count_table.txt"))
+```
+
+***Question:** how can we inspect this data?*
+
+Next we will read the taxonomy table stored in `"papa2012_taxonomy_table.txt"`
+
+```{r}
+taxonomy <- read_tsv(file = here("data/papa2012/papa2012_taxonomy_table.txt"))
+```
+
+**Note:** it doesn't actually matter what name we give to the data objects, but a good name helps make the code readable.
+
+```{r}
+x <- meta # This creates a copy of meta, called x. 
+```
+
+### Our first graph
+
+For a simple start, let's plot a histogram of OTU number 1.
+
+```{r}
+#| fig.width: 7
+#| fig.height: 2
+
+counts %>% ggplot(aes(OTU_00001)) + geom_histogram(bins = 50)
+```
+
+Looks like there are a lot of zeros! This code counts how many.
+
+```{r}
+table(OTU00001_has_0_counts = counts$OTU_00001 == 0, useNA = "ifany")
+```
+
+## Assemble a phyloseq 🛠️
+
+So far we have not used any R packages specialised for microbiome data.
+
+Let's do so, because it will make our next tasks a lot easier!
+
+We will start by combining our three datasets into one phyloseq object
+
+The code for this bit can be quite tricky. So don't worry, you can just run it.
+
+### OTU counts + taxonomy
+
+This code combines the count table and taxonomy table.
+
+```{r}
+# `phyloseq` uses row or column names to match OTUs across count and taxonomy tables.
+# In addition, the taxonomy table must contain taxonomic ranks in descending order,
+# and the count table must be converted to a numeric matrix.
+
+# these lines convert the "dataframe" of counts into a matrix
+count_matrix <- counts %>% select(where(is.numeric)) %>% as.matrix()
+rownames(count_matrix) <- counts$sample
+
+# these lines convert the "dataframe" of taxonomy into a matrix
+tax_matrix <- taxonomy %>% select(!OTU) %>% as.matrix()
+rownames(tax_matrix) <- taxonomy$OTU
+
+# these lines start making the phyloseq object
+ps <- phyloseq(
+  otu_table(count_matrix, taxa_are_rows = FALSE), 
+  tax_table(tax_matrix)
+)
+```
+
+Look what we have made so far.
+
+```{r}
+ps
+```
+
+### Adding sample metadata
+
+Next we reformat the the metadata table so we can add it to our phyloseq
+
+```{r}
+# phyloseq uses row names to match samples (across the OTU count table and the sample metadata).
+# in the phyloseq object the sample names have underscores, but in the meta object they have hyphens
+
+# We can fix that with the `str_replace` function.
+meta$sample <- meta$sample %>% str_replace(pattern = "-", replacement = "_")
+
+# Now make them row names, and check they all match the phyloseq sample names
+meta_df <- as.data.frame(meta)
+rownames(meta_df) <- meta$sample
+all(rownames(meta_df) %in% sample_names(ps))
+```
+
+Add the metadata to the phyloseq, and look at the phyloseq.
+
+```{r}
+# this adds the metadata to the phyloseq object
+sample_data(ps) <- meta_df
+
+# this prints the updated phyloseq object "ps"
+ps
+```
+
+## microViz 🦠👁️
+
+microViz provides tools for microbiome data analysis, using phyloseq objects.
+
+I developed the microViz package during my PhD. Many other microbiome researchers now also use it.
+
+Let's first take a look at the tables stored inside the phyloseq object.
+
+```{r}
+samdat_tbl(ps) # retrieve sample data as a tibble
+```
+
+```{r}
+# get a small part of the OTU table
+otu_get(ps, taxa = 1:5, samples = c("132_AX", "166_AX", "102_AZ"))
+```
+
+```{r}
+# look at the first 3 lines of the taxonomy table
+tt_get(ps) %>% head(3)
+```
+
+The taxonomy table contains some missing values e.g. when the genus classification is not known.
+
+microViz can fix those gaps by using the next highest level of classification that is available, e.g. Family.
+
+```{r}
+ps <- tax_fix(ps)
+```
+
+## Build some bar charts 📊
+
+Sequencing data are compositional. The total number of reads per sample is mostly arbitrary, and so the counts should be interpreted as relative abundances instead of absolute abundances.
+
+A simple way to visualise compositional data is as percentages, proportions of a whole.
+
+Stacked bar charts are great for this: each bar represents one sample, and we can show the abundance data as proportions, after aggregating the counts by taxonomy.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 2
+ps %>% comp_barplot("Phylum", n_taxa = 4, label = NULL)
+```
+
+This plot is aggregated into phyla, which is easy to read, and provides basic information.
+
+We see that most samples contain a mixture of *Firmicutes* and *Bacteroidetes*, but some appear to be dominated by *Proteobacteria* instead.
+
+We can visually compare the patient groups in this dataset by "faceting" the samples on the plot.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 3
+ps %>% 
+  comp_barplot("Phylum", n_taxa = 4, label = NULL) +
+  facet_grid(cols = vars(diagnosis), scales = "free") +
+  force_panelsizes(cols = c(table(ps@sam_data$diagnosis)))
+```
+
+It seems that most of the patients who have gut microbiota dominated by Proteobacteria are Ulcerative Colitis patients (UC). Let's dig deeper into the taxonomic classifications.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+ps %>% comp_barplot("Genus", n_taxa = 11, merge_other = F, label = NULL) +
+  facet_grid(cols = vars(diagnosis), scales = "free") +
+  force_panelsizes(cols = c(table(ps@sam_data$diagnosis)))
+```
+
+This plot is aggregated into genera, which provides more detail, but is harder to read, and we cannot give every genus a distinct colour.
+
+We see that many samples contain a relatively large proportion of *Bacteroides* or *Faecalibacterium* but there is quite some further variation! The Proteobacteria-dominated samples seem to contain OTUs classified as Escherichia/Shigella (16S amplicons can't tell us which) or Klebsiella.
+
+Some taxa could not be classified at genus level. Here we see a group named Lachnospiraceae Family, instead of a genus name.
+
+## Discover diversity 🌳🌲🌴
+
+As a last task for this practical, we will calculate and visualise alpha diversity.
+
+### Why is diversity interesting?
+
+#### Biologically
+
+-   Higher diversity ecosystems are probably more resilient to perturbations
+-   Lower gut microbiota diversity sometimes accompanies various health problems (in adults)
+-   BUT: `diverse == healthy` is not `TRUE` for all ecosystems (e.g. early infant gut microbiome)
+-   So, consider your own data and diversity hypotheses carefully
+
+#### Practically
+
+-   Diversity indices provide a simple "one number" summary of each ecosystem
+-   This makes it relatively easy to compare samples, and do statistical testing
+
+### Observed richness
+
+-   The simplest richness measure is just counting, a.k.a. "Observed Richness".
+-   Let's compute the observed richness of genera.
+-   `ps_calc_richness()` computes the index for each sample and adds it to your sample_data
+
+```{r}
+ps_alpha <- ps %>% ps_calc_richness(rank = "Genus", index = "observed", varname = "N_genera")
+```
+
+### Shannon diversity
+
+Next we will calculate the Shannon diversity index at the level of Genus.
+
+-   The Shannon index is a commonly used diversity measure, with this formula: $H = -\sum_{i=1}^Np_i\ln p_i$
+-   Shannon index is often is denoted with $H$, and here $p_i$ denotes the proportional abundance of the $i$'th of $N$ taxa in the sample.
+
+##### Explanation of the Shannon index formula
+
+-   For each taxon $i$, you multiply its proportional abundance $p_i$ by the natural log of that proportion $\ln p_i$, and sum those values.
+-   The highest value you can achieve with $N$ taxa occurs with equal proportions (e.g. with 20 taxa, maximum diversity occurs if each has a relative abundance of 5%, i.e. 0.05)
+-   Lastly, you change the sign of the result to a positive number, for ease of interpretation (this just makes more intuitive sense: as higher positive numbers indicates higher diversity.)
+
+We will also compute an exponentiated version, the effective number of genera, or effective Shannon index.
+
+##### Explanation of the "**Effective"** Shannon Diversity
+
+The exponent of the Shannon index $e^H$ represents the number of taxa (genera) that would be present in an evenly abundant ecosystem with the same Shannon index.
+
+-   The numeric value of the Shannon index itself has no intuitive meaning.
+-   You can compare them, but can't easily interpret any one number.
+-   So, the concept of "effective numbers" of taxa is useful here.
+-   If your original ecosystem was actually perfectly even, then $e^H = N$
+-   Where N is the observed richness
+-   The more uneven an ecosystem, the further $e^H$ will be from $N$
+
+```{r}
+ps_alpha <- ps_alpha %>% 
+  ps_calc_diversity(index = "shannon", rank = "Genus", varname = "Shannon_Genus") %>% 
+  ps_mutate(Effective_Shannon_Genus = exp(Shannon_Genus))
+
+ps_alpha
+```
+
+The new genus-level richness and diversity variables are stored in the sample data slot of `ps_alpha`
+
+```{r}
+samdat_tbl(ps_alpha) %>% select(sample, N_genera, Shannon_Genus, Effective_Shannon_Genus)
+```
+
+### Diversity Distributions
+
+First we can plot basic histograms of the richness and diversity values we observe. Try changing the variable name to make different plots, and notice the different range of values for each.
+
+```{r, fig.height=3, fig.width=7}
+hist(samdat_tbl(ps_alpha)[["N_genera"]])
+```
+
+```{r, fig.height=3, fig.width=7}
+# make another plot here? copy-paste and edit the variable name
+
+```
+
+### Comparing diversity across groups
+
+#### Plot Effective Shannon diversity
+
+We can make box plots to compare diversity across groups.
+
+```{r}
+#| fig-height: 3
+#| fig-width: 5
+ps_alpha %>% 
+  samdat_tbl() %>% 
+  ggplot(aes(x = Effective_Shannon_Genus, y = diagnosis, color = diagnosis)) + 
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(height = 0.2) +
+  theme_classic()
+```
+
+It looks like the Ulcerative Colitis patients might have a lower diversity on average.
+
+But we should check this with statistical testing.
+
+#### Linear Regression / ANOVA
+
+You can use standard statistical testing on the diversity values e.g. linear regression or ANOVA
+
+```{r}
+eShannon_lm <- lm(data = samdat_tbl(ps_alpha), formula = Effective_Shannon_Genus ~ diagnosis)
+anova(eShannon_lm)
+```
+
+```{r}
+eShannon_tukey <- TukeyHSD(aov(eShannon_lm))
+eShannon_tukey
+```
+
+#### ggstatsplot
+
+For simple group comparisons like this, the `ggstatsplot` package works like magic, making plots with detailed statistical reporting added automatically.
+
+```{r}
+ggbetweenstats(
+  data = samdat_tbl(ps_alpha), 
+  x = diagnosis, y = Effective_Shannon_Genus,
+  bf.message = FALSE
+)
+```
+
+### Interpreting diversity
+
+This last section is just an exercise to gain a bit more intuition for the richness and diversity measures.
+
+#### **Observed Richness:** Number of Genera
+
+Each sample is sorted and labelled by the observed richness of genera
+
+Can you spot samples with equal richness but clear differences in evenness?
+
+```{r, fig.height=11, fig.width=6}
+ps_alpha %>% 
+  ps_arrange(N_genera) %>% 
+  comp_barplot(
+    tax_level = "Genus", n_taxa = 19, merge_other = FALSE, 
+    sample_order = "asis", label = "N_genera"
+  ) +
+  coord_flip()
+```
+
+#### **Diversity:** Shannon Effective Number of Genera
+
+Now each sample is labelled with the effective Shannon diversity of genera ($e^H$)
+
+Do you see the general relationship of $e^H$ with sample composition?
+
+```{r, fig.height=11, fig.width=6}
+ps_alpha %>% 
+  ps_arrange(Effective_Shannon_Genus) %>% 
+  ps_mutate(short_shannon = formatC(Effective_Shannon_Genus, digits = 1, format = "f")) %>% 
+  comp_barplot(
+    tax_level = "Genus", n_taxa = 19, merge_other = FALSE, 
+    sample_order = "asis", label = "short_shannon"
+  ) +
+  coord_flip()
+```
+
+## Save our phyloseq
+
+We have assembled a phyloseq object and calculated richness and diversity measures.
+
+Let's store the result of this processing, by writing the phyloseq object to a file.
+
+We can use the `saveRDS()` function to do this.
+
+```{r}
+saveRDS(ps_alpha, file = here("data", "papa2012", "processed", "papa12_phyloseq.rds"))
+```
+
+## Next! ⏩
+
+-   Its time to stop exploring and take a break.
+-   In the next presentation you will learn more about ordination methods for microbiota data analysis.
+-   In the next practical you will use an interactive tool to explore the data further.
